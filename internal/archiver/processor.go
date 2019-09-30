@@ -87,7 +87,7 @@ func (arc *Archiver) ProcessHTMLFile(res ResourceURL, input io.Reader) (result P
 	// Get outer HTML of the doc
 	result = ProcessResult{
 		Name:    res.ArchivalURL,
-		Content: outerHTML(doc),
+		Content: []byte(outerHTML(doc)),
 	}
 
 	return result, resources, nil

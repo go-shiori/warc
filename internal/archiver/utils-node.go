@@ -138,19 +138,30 @@ func textContent(node *html.Node) string {
 }
 
 // outerHTML returns an HTML serialization of the element and its descendants.
-func outerHTML(node *html.Node) []byte {
+// The returned HTML value is escaped.
+func outerHTML(node *html.Node) string {
+	if node == nil {
+		return ""
+	}
+
 	var buffer bytes.Buffer
 	err := html.Render(&buffer, node)
 	if err != nil {
-		return []byte{}
+		return ""
 	}
-	return buffer.Bytes()
+
+	return buffer.String()
 }
 
 // innerHTML returns the HTML content (inner HTML) of an element.
+// The returned HTML value is escaped.
 func innerHTML(node *html.Node) string {
 	var err error
 	var buffer bytes.Buffer
+
+	if node == nil {
+		return ""
+	}
 
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
 		err = html.Render(&buffer, child)
@@ -188,7 +199,7 @@ func className(node *html.Node) string {
 	return className
 }
 
-// children returns an HTMLCollection of the child elements of Node.
+// children returns an HTMLCollection of the direct child elements of Node.
 func children(node *html.Node) []*html.Node {
 	var children []*html.Node
 	if node == nil {
@@ -200,6 +211,7 @@ func children(node *html.Node) []*html.Node {
 			children = append(children, child)
 		}
 	}
+
 	return children
 }
 
@@ -266,9 +278,18 @@ func prependChild(node *html.Node, child *html.Node) {
 }
 
 // replaceNode replaces an OldNode with a NewNode.
+// If the new node is a reference to an existing node in the
+// document, replaceNode() moves it from its current position
+// to replacing old node.
 func replaceNode(oldNode *html.Node, newNode *html.Node) {
 	if oldNode.Parent == nil {
 		return
+	}
+
+	if newNode.Parent != nil {
+		tmp := cloneNode(newNode)
+		newNode.Parent.RemoveChild(newNode)
+		newNode = tmp
 	}
 
 	newNode.Parent = nil
@@ -307,6 +328,8 @@ func cloneNode(src *html.Node) *html.Node {
 	return clone
 }
 
+// getAllNodesWithTag is wrapper for getElementsByTagName()
+// which allow to get several tags at once.
 func getAllNodesWithTag(node *html.Node, tagNames ...string) []*html.Node {
 	var result []*html.Node
 	for i := 0; i < len(tagNames); i++ {
@@ -337,10 +360,11 @@ func removeNodes(nodeList []*html.Node, filterFn func(*html.Node) bool) {
 
 // setTextContent sets the text content of the specified node.
 func setTextContent(node *html.Node, text string) {
-	for child := node.FirstChild; child != nil; child = child.NextSibling {
-		if child.Parent != nil {
-			child.Parent.RemoveChild(child)
-		}
+	child := node.FirstChild
+	for child != nil {
+		nextSibling := child.NextSibling
+		node.RemoveChild(child)
+		child = nextSibling
 	}
 
 	node.AppendChild(&html.Node{
