@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/go-shiori/dom"
 	"github.com/tdewolff/parse/v2/css"
 	"github.com/tdewolff/parse/v2/js"
 	"golang.org/x/net/html"
@@ -47,7 +48,7 @@ func (arc *Archiver) ProcessHTMLFile(res ResourceURL, input io.Reader) (result P
 	// TODO: I'm still not really sure, but IMHO it's safer to disable Javascript
 	// Ideally, we only want to remove XHR request by using function disableXHR(doc).
 	// Unfortunately, the result is not that good for now, so it's still not used.
-	removeNodes(getElementsByTagName(doc, "script"), nil)
+	dom.RemoveNodes(dom.GetElementsByTagName(doc, "script"), nil)
 
 	// Convert lazy loaded image to normal
 	fixLazyImages(doc)
@@ -56,14 +57,14 @@ func (arc *Archiver) ProcessHTMLFile(res ResourceURL, input io.Reader) (result P
 	fixRelativeURIs(doc, parsedURL)
 
 	// Extract resources from each nodes
-	for _, node := range getElementsByTagName(doc, "*") {
+	for _, node := range dom.GetElementsByTagName(doc, "*") {
 		// First extract resources from inline style
 		cssResources := extractInlineCSS(node, parsedURL)
 		resources = append(resources, cssResources...)
 
 		// Next extract resources from tag's specific attribute
 		nodeResources := []ResourceURL{}
-		switch tagName(node) {
+		switch dom.TagName(node) {
 		case "style":
 			nodeResources = extractStyleTag(node, parsedURL)
 		case "script":
@@ -87,7 +88,7 @@ func (arc *Archiver) ProcessHTMLFile(res ResourceURL, input io.Reader) (result P
 	// Get outer HTML of the doc
 	result = ProcessResult{
 		Name:    res.ArchivalURL,
-		Content: []byte(outerHTML(doc)),
+		Content: []byte(dom.OuterHTML(doc)),
 	}
 
 	return result, resources, nil
@@ -133,12 +134,12 @@ func (arc *Archiver) ProcessOtherFile(res ResourceURL, input io.Reader) (result 
 
 func disableXHR(doc *html.Node) {
 	var head *html.Node
-	heads := getElementsByTagName(doc, "head")
+	heads := dom.GetElementsByTagName(doc, "head")
 	if len(heads) > 0 {
 		head = heads[0]
 	} else {
-		head = createElement("head")
-		prependChild(doc, head)
+		head = dom.CreateElement("head")
+		dom.PrependChild(doc, head)
 	}
 
 	xhrDisabler := `
@@ -155,18 +156,18 @@ func disableXHR(doc *html.Node) {
 		getAllResponseHeaders(): function(){},
 	};`
 
-	script := createElement("script")
-	scriptContent := createTextNode(xhrDisabler)
-	prependChild(script, scriptContent)
-	prependChild(head, script)
+	script := dom.CreateElement("script")
+	scriptContent := dom.CreateTextNode(xhrDisabler)
+	dom.PrependChild(script, scriptContent)
+	dom.PrependChild(head, script)
 }
 
 // fixRelativeURIs converts each <a> in the given element
 // to an absolute URI, ignoring #ref URIs.
 func fixRelativeURIs(doc *html.Node, pageURL *nurl.URL) {
-	links := getAllNodesWithTag(doc, "a")
-	forEachNode(links, func(link *html.Node, _ int) {
-		href := getAttribute(link, "href")
+	links := dom.GetAllNodesWithTag(doc, "a")
+	dom.ForEachNode(links, func(link *html.Node, _ int) {
+		href := dom.GetAttribute(link, "href")
 		if href == "" {
 			return
 		}
@@ -175,14 +176,14 @@ func fixRelativeURIs(doc *html.Node, pageURL *nurl.URL) {
 		// since they won't work after scripts have been removed
 		// from the page.
 		if strings.HasPrefix(href, "javascript:") {
-			text := createTextNode(textContent(link))
-			replaceNode(link, text)
+			text := dom.CreateTextNode(dom.TextContent(link))
+			dom.ReplaceChild(link.Parent, text, link)
 		} else {
 			newHref := toAbsoluteURI(href, pageURL)
 			if newHref == "" {
-				removeAttribute(link, "href")
+				dom.RemoveAttribute(link, "href")
 			} else {
-				setAttribute(link, "href", newHref)
+				dom.SetAttribute(link, "href", newHref)
 			}
 		}
 	})
@@ -191,12 +192,12 @@ func fixRelativeURIs(doc *html.Node, pageURL *nurl.URL) {
 // fixLazyImages convert images and figures that have properties like data-src into
 // images that can be loaded without JS.
 func fixLazyImages(root *html.Node) {
-	imageNodes := getAllNodesWithTag(root, "img", "picture", "figure")
-	forEachNode(imageNodes, func(elem *html.Node, _ int) {
-		src := getAttribute(elem, "src")
-		srcset := getAttribute(elem, "srcset")
-		nodeTag := tagName(elem)
-		nodeClass := className(elem)
+	imageNodes := dom.GetAllNodesWithTag(root, "img", "picture", "figure")
+	dom.ForEachNode(imageNodes, func(elem *html.Node, _ int) {
+		src := dom.GetAttribute(elem, "src")
+		srcset := dom.GetAttribute(elem, "srcset")
+		nodeTag := dom.TagName(elem)
+		nodeClass := dom.ClassName(elem)
 
 		if (src == "" && srcset == "") || strings.Contains(strings.ToLower(nodeClass), "lazy") {
 			for i := 0; i < len(elem.Attr); i++ {
@@ -218,14 +219,14 @@ func fixLazyImages(root *html.Node) {
 
 				if nodeTag == "img" || nodeTag == "picture" {
 					// if this is an img or picture, set the attribute directly
-					setAttribute(elem, copyTo, attr.Val)
-				} else if nodeTag == "figure" && len(getAllNodesWithTag(elem, "img", "picture")) == 0 {
+					dom.SetAttribute(elem, copyTo, attr.Val)
+				} else if nodeTag == "figure" && len(dom.GetAllNodesWithTag(elem, "img", "picture")) == 0 {
 					// if the item is a <figure> that does not contain an image or picture,
 					// create one and place it inside the figure see the nytimes-3
 					// testcase for an example
-					img := createElement("img")
-					setAttribute(img, copyTo, attr.Val)
-					appendChild(elem, img)
+					img := dom.CreateElement("img")
+					dom.SetAttribute(img, copyTo, attr.Val)
+					dom.AppendChild(elem, img)
 				}
 			}
 		}
@@ -237,7 +238,7 @@ func fixLazyImages(root *html.Node) {
 // will be updated to use the archival URL.
 func extractInlineCSS(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	// Make sure this node has inline style
-	styleAttr := getAttribute(node, "style")
+	styleAttr := dom.GetAttribute(node, "style")
 	if styleAttr == "" {
 		return nil
 	}
@@ -246,7 +247,7 @@ func extractInlineCSS(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	// and update the CSS rules accordingly.
 	reader := strings.NewReader(styleAttr)
 	newStyleAttr, resources := processCSS(reader, pageURL)
-	setAttribute(node, "style", newStyleAttr)
+	dom.SetAttribute(node, "style", newStyleAttr)
 
 	return resources
 }
@@ -255,7 +256,7 @@ func extractInlineCSS(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 // Once finished, all CSS URLs will be updated to use the archival URL.
 func extractStyleTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	// Extract CSS rules from <style>
-	rules := textContent(node)
+	rules := dom.TextContent(node)
 	rules = strings.TrimSpace(rules)
 	if rules == "" {
 		return nil
@@ -264,7 +265,7 @@ func extractStyleTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	// Extract resource URLs from the rules and update it accordingly.
 	reader := strings.NewReader(rules)
 	newRules, resources := processCSS(reader, pageURL)
-	setTextContent(node, newRules)
+	dom.SetTextContent(node, newRules)
 
 	return resources
 }
@@ -276,7 +277,7 @@ func extractScriptTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	resources := extractGenericTag(node, "src", pageURL)
 
 	// Extract JS code from the <script> itself
-	script := textContent(node)
+	script := dom.TextContent(node)
 	script = strings.TrimSpace(script)
 	if script == "" {
 		return resources
@@ -284,7 +285,7 @@ func extractScriptTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 
 	reader := strings.NewReader(script)
 	newScript, scriptResources := processJS(reader, pageURL)
-	setTextContent(node, newScript)
+	dom.SetTextContent(node, newScript)
 	resources = append(resources, scriptResources...)
 
 	return resources
@@ -298,9 +299,9 @@ func extractScriptTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 // to use the archival URL.
 func extractMetaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	// Get the needed attributes
-	name := getAttribute(node, "name")
-	property := getAttribute(node, "property")
-	content := getAttribute(node, "content")
+	name := dom.GetAttribute(node, "name")
+	property := dom.GetAttribute(node, "property")
+	content := dom.GetAttribute(node, "content")
 
 	// If this <meta> is not for image, don't process it
 	if !rxImageMeta.MatchString(name + " " + property) {
@@ -319,7 +320,7 @@ func extractMetaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 		return nil
 	}
 
-	setAttribute(node, "content", res.ArchivalURL)
+	dom.SetAttribute(node, "content", res.ArchivalURL)
 	return []ResourceURL{res}
 }
 
@@ -328,9 +329,9 @@ func extractMetaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 // updated to use the archival URL.
 func extractMediaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	// Get the needed attributes
-	src := getAttribute(node, "src")
-	poster := getAttribute(node, "poster")
-	strSrcSets := getAttribute(node, "srcset")
+	src := dom.GetAttribute(node, "src")
+	poster := dom.GetAttribute(node, "poster")
+	strSrcSets := dom.GetAttribute(node, "srcset")
 
 	// Create initial resources
 	resources := []ResourceURL{}
@@ -339,7 +340,7 @@ func extractMediaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	if src != "" {
 		res := ToResourceURL(src, pageURL)
 		if res.ArchivalURL != "" {
-			setAttribute(node, "src", res.ArchivalURL)
+			dom.SetAttribute(node, "src", res.ArchivalURL)
 			resources = append(resources, res)
 		}
 	}
@@ -347,7 +348,7 @@ func extractMediaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	if poster != "" {
 		res := ToResourceURL(poster, pageURL)
 		if res.ArchivalURL != "" {
-			setAttribute(node, "poster", res.ArchivalURL)
+			dom.SetAttribute(node, "poster", res.ArchivalURL)
 			resources = append(resources, res)
 		}
 	}
@@ -371,7 +372,7 @@ func extractMediaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 	}
 
 	if len(srcSets) > 0 {
-		setAttribute(node, "srcset", strings.Join(srcSets, ","))
+		dom.SetAttribute(node, "srcset", strings.Join(srcSets, ","))
 	}
 
 	return resources
@@ -385,7 +386,7 @@ func extractMediaTag(node *html.Node, pageURL *nurl.URL) []ResourceURL {
 // archival URL.
 func extractGenericTag(node *html.Node, attrName string, pageURL *nurl.URL) []ResourceURL {
 	// Get the needed attributes
-	attrValue := getAttribute(node, attrName)
+	attrValue := dom.GetAttribute(node, attrName)
 	if attrValue == "" {
 		return nil
 	}
@@ -396,11 +397,11 @@ func extractGenericTag(node *html.Node, attrName string, pageURL *nurl.URL) []Re
 	}
 
 	// If this node is iframe, mark it as embedded
-	if tagName(node) == "iframe" {
+	if dom.TagName(node) == "iframe" {
 		res.IsEmbedded = true
 	}
 
-	setAttribute(node, attrName, res.ArchivalURL)
+	dom.SetAttribute(node, attrName, res.ArchivalURL)
 	return []ResourceURL{res}
 }
 
