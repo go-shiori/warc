@@ -111,10 +111,19 @@ func (arc *Archiver) archive(req Request, root bool) error {
 	wg := sync.WaitGroup{}
 	wg.Add(len(subResources))
 
+	semaphore := make(chan struct{}, 5)
+	defer close(semaphore)
+
 	for _, subResource := range subResources {
 		go func(subResource processor.Resource) {
 			// Make sure to finish the WG
 			defer wg.Done()
+
+			// Register goroutine to semaphore
+			semaphore <- struct{}{}
+			defer func() {
+				<-semaphore
+			}()
 
 			// Archive the sub resource
 			var subResContent io.Reader
