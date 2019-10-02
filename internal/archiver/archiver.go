@@ -52,7 +52,7 @@ func (arc *Archiver) archive(req Request, root bool) error {
 	}
 
 	// Download page if needed
-	if req.Reader == nil {
+	if req.Reader == nil || req.ContentType == "" {
 		arc.logInfo("Downloading %s\n", req.URL)
 
 		resp, err := arc.downloadPage(req.URL)

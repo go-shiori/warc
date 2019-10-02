@@ -27,7 +27,7 @@ func NewArchive(req ArchivalRequest, dstPath string) error {
 	// Make sure URL is valid
 	parsedURL, err := nurl.ParseRequestURI(req.URL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Hostname() == "" {
-		return fmt.Errorf("url %s is not valid", req.URL)
+		return fmt.Errorf("url \"%s\" is not valid", req.URL)
 	}
 
 	// Create database for archive
