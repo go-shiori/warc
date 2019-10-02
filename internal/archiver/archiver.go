@@ -105,7 +105,7 @@ func (arc *Archiver) archive(req Request, root bool) error {
 	arc.resourceMap[req.URL] = struct{}{}
 	arc.Unlock()
 
-	arc.logInfo("Saved %s (%d)\n", resource.URL, len(subResources))
+	arc.logInfo("Saved %s (%d)\n", resource.URL, len(resource.Content))
 
 	// Archive the sub resources
 	wg := sync.WaitGroup{}

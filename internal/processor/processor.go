@@ -65,6 +65,7 @@ func createResource(content []byte, url string, baseURL *nurl.URL) (Resource, er
 	}
 
 	resourceName = strings.ReplaceAll(resourceName, "://", "/")
+	resourceName = strings.ReplaceAll(resourceName, ":", "-")
 	resourceName = strings.ReplaceAll(resourceName, "?", "-")
 	resourceName = strings.ReplaceAll(resourceName, "#", "-")
 	resourceName = strings.ReplaceAll(resourceName, "/", "-")
