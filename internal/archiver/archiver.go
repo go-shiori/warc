@@ -4,163 +4,160 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/go-shiori/warc/internal/processor"
+	"github.com/sirupsen/logrus"
 	"go.etcd.io/bbolt"
 )
 
-// Archiver is struct for archiving an URL and its resources.
+// Request is struct that contains page data that want to be archived.
+type Request struct {
+	Reader      io.Reader
+	URL         string
+	ContentType string
+}
+
+// Archiver is struct that do the archival.
 type Archiver struct {
 	sync.RWMutex
-	sync.WaitGroup
 
-	DB          *bbolt.DB
-	ChDone      chan struct{}
-	ChErrors    chan error
-	ChWarnings  chan error
-	ChRequest   chan ResourceURL
-	ResourceMap map[string]struct{}
-	LogEnabled  bool
+	DB         *bbolt.DB
+	UserAgent  string
+	LogEnabled bool
+
+	resourceMap map[string]struct{}
 }
 
-// Close closes channels that used by the Archiver.
-func (arc *Archiver) Close() {
-	close(arc.ChErrors)
-	close(arc.ChWarnings)
-	close(arc.ChRequest)
-}
-
-// StartArchiver starts the archival process.
-func (arc *Archiver) StartArchiver() []error {
-	go func() {
-		time.Sleep(time.Second)
-		arc.Wait()
-		close(arc.ChDone)
-	}()
-
-	// Download the URL concurrently.
-	// After download finished, parse response to extract resources
-	// URL inside it. After that, send it to channel to download again.
-	errors := make([]error, 0)
-	warnings := make([]error, 0)
-
-	func() {
-		for {
-			select {
-			case <-arc.ChDone:
-				return
-			case err := <-arc.ChErrors:
-				errors = append(errors, err)
-			case err := <-arc.ChWarnings:
-				warnings = append(warnings, err)
-			case res := <-arc.ChRequest:
-				arc.RLock()
-				_, exist := arc.ResourceMap[res.DownloadURL]
-				arc.RUnlock()
-
-				if !exist {
-					arc.Add(1)
-					go arc.archive(res)
-				}
-			}
-		}
-	}()
-
-	// Print log message if required
-	if arc.LogEnabled {
-		nErrors := len(errors)
-		nWarnings := len(warnings)
-		arc.Logf(infoLog, "Download finished with %d warnings and %d errors\n", nWarnings, nErrors)
-
-		if nWarnings > 0 {
-			fmt.Println()
-			for _, warning := range warnings {
-				arc.Log(warningLog, warning)
-			}
-		}
-
-		if nErrors > 0 {
-			for _, err := range errors {
-				arc.Log(errorLog, err)
-			}
-		}
+// Start starts the archival process
+func (arc *Archiver) Start(req Request) error {
+	if arc.resourceMap == nil {
+		arc.resourceMap = make(map[string]struct{})
 	}
+
+	return arc.archive(req, true)
+}
+
+func (arc *Archiver) archive(req Request, root bool) error {
+	// Check if this request already processed before
+	arc.RLock()
+	_, processed := arc.resourceMap[req.URL]
+	arc.RUnlock()
+
+	if processed {
+		return nil
+	}
+
+	// Download page if needed
+	if req.Reader == nil {
+		arc.logInfo("Downloading %s\n", req.URL)
+
+		resp, err := arc.downloadPage(req.URL)
+		if err != nil {
+			return fmt.Errorf("failed to download %s: %v", req.URL, err)
+		}
+		defer resp.Body.Close()
+
+		req.Reader = resp.Body
+		req.ContentType = resp.Header.Get("Content-Type")
+	}
+
+	// Process input
+	var err error
+	resource := processor.Resource{}
+	subResources := []processor.Resource{}
+	processorRequest := processor.Request{
+		Reader: req.Reader,
+		URL:    req.URL,
+	}
+
+	switch {
+	case strings.Contains(req.ContentType, "text/html"):
+		resource, subResources, err = processor.ProcessHTMLFile(processorRequest)
+		if !root && !resource.IsEmbed {
+			subResources = []processor.Resource{}
+		}
+	case strings.Contains(req.ContentType, "text/css") && !root:
+		resource, subResources, err = processor.ProcessCSSFile(processorRequest)
+	default:
+		resource, err = processor.ProcessGeneralFile(processorRequest)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to archive %s: %v", req.URL, err)
+	}
+
+	// Save resource to storage
+	if root {
+		resource.Name = "archive-root"
+	}
+
+	err = arc.saveResource(resource, req.ContentType)
+	if err != nil {
+		return fmt.Errorf("failed to save %s: %v", req.URL, err)
+	}
+
+	// Save this resource to map
+	arc.Lock()
+	arc.resourceMap[req.URL] = struct{}{}
+	arc.Unlock()
+
+	arc.logInfo("Saved %s (%d)\n", resource.URL, len(subResources))
+
+	// Archive the sub resources
+	wg := sync.WaitGroup{}
+	wg.Add(len(subResources))
+
+	for _, subResource := range subResources {
+		go func(subResource processor.Resource) {
+			// Make sure to finish the WG
+			defer wg.Done()
+
+			// Archive the sub resource
+			var subResContent io.Reader
+			if len(subResource.Content) > 0 {
+				subResContent = bytes.NewBuffer(subResource.Content)
+			}
+
+			subResRequest := Request{
+				Reader: subResContent,
+				URL:    subResource.URL,
+			}
+
+			err := arc.archive(subResRequest, false)
+			if err != nil {
+				arc.logWarning("Failed to save %s: %v\n", subResource.URL, err)
+			}
+		}(subResource)
+	}
+
+	wg.Wait()
 
 	return nil
 }
 
-// archive downloads a subresource and save it to storage.
-func (arc *Archiver) archive(res ResourceURL) {
-	// Make sure to decrease wait group once finished
-	defer arc.Done()
-
-	// Download resource
-	resp, err := DownloadData(res.DownloadURL)
+// DownloadData downloads data from the specified URL.
+func (arc *Archiver) downloadPage(url string) (*http.Response, error) {
+	// Prepare request
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		arc.ChErrors <- fmt.Errorf("failed to download %s: %v", res.DownloadURL, err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Process resource depending on its type.
-	// Since this `archive` method only used for processing sub
-	// resource, we will only process the CSS and HTML sub resources.
-	// For other file, we will simply download it as it is.
-	var result ProcessResult
-	var subResources []ResourceURL
-	cType := resp.Header.Get("Content-Type")
-
-	switch {
-	case strings.Contains(cType, "text/html") && res.IsEmbedded:
-		result, subResources, err = arc.ProcessHTMLFile(res, resp.Body)
-	case strings.Contains(cType, "text/css"):
-		result, subResources, err = arc.ProcessCSSFile(res, resp.Body)
-	default:
-		result, err = arc.ProcessOtherFile(res, resp.Body)
+		return nil, err
 	}
 
-	if err != nil {
-		arc.ChErrors <- fmt.Errorf("failed to process %s: %v", res.DownloadURL, err)
-		return
-	}
-
-	// Add this url to resource map
-	arc.Lock()
-	arc.ResourceMap[res.DownloadURL] = struct{}{}
-	arc.Unlock()
-
-	// Save content to storage
-	arc.Logf(infoLog, "Downloaded %s\n"+
-		"\tArchive name %s\n"+
-		"\tParent %s\n"+
-		"\tSize %d Bytes\n",
-		res.DownloadURL,
-		res.ArchivalURL,
-		res.Parent,
-		resp.ContentLength)
-
-	result.ContentType = cType
-	err = arc.SaveToStorage(result)
-	if err != nil {
-		arc.ChErrors <- fmt.Errorf("failed to save %s: %v", res.DownloadURL, err)
-		return
-	}
-
-	// Send sub resource to request channel
-	for _, subRes := range subResources {
-		arc.ChRequest <- subRes
-	}
+	// Send request
+	req.Header.Set("User-Agent", arc.UserAgent)
+	return httpClient.Do(req)
 }
 
-// SaveToStorage save processing result to storage.
-func (arc *Archiver) SaveToStorage(result ProcessResult) error {
+func (arc *Archiver) saveResource(resource processor.Resource, contentType string) error {
 	// Compress content
 	buffer := bytes.NewBuffer(nil)
 	gzipper := gzip.NewWriter(buffer)
 
-	_, err := gzipper.Write(result.Content)
+	_, err := gzipper.Write(resource.Content)
 	if err != nil {
 		return fmt.Errorf("compress failed: %v", err)
 	}
@@ -171,12 +168,12 @@ func (arc *Archiver) SaveToStorage(result ProcessResult) error {
 	}
 
 	err = arc.DB.Batch(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte(result.Name))
+		bucket := tx.Bucket([]byte(resource.Name))
 		if bucket != nil {
 			return nil
 		}
 
-		bucket, err := tx.CreateBucketIfNotExists([]byte(result.Name))
+		bucket, err := tx.CreateBucketIfNotExists([]byte(resource.Name))
 		if err != nil {
 			return err
 		}
@@ -186,7 +183,7 @@ func (arc *Archiver) SaveToStorage(result ProcessResult) error {
 			return err
 		}
 
-		err = bucket.Put([]byte("type"), []byte(result.ContentType))
+		err = bucket.Put([]byte("type"), []byte(contentType))
 		if err != nil {
 			return err
 		}
@@ -195,4 +192,16 @@ func (arc *Archiver) SaveToStorage(result ProcessResult) error {
 	})
 
 	return err
+}
+
+func (arc *Archiver) logInfo(format string, args ...interface{}) {
+	if arc.LogEnabled {
+		logrus.Infof(format, args...)
+	}
+}
+
+func (arc *Archiver) logWarning(format string, args ...interface{}) {
+	if arc.LogEnabled {
+		logrus.Warnf(format, args...)
+	}
 }
